@@ -1,0 +1,38 @@
+{
+  "name": "dsh-tool-wsl",
+  "version": "0.1.0",
+  "description": "WSL 命令行工具：在 WSL（Ubuntu）环境执行 bash 命令（wsl.exe -d <distro> -- bash -c），Windows 上取代 dsh-tool-bash",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "README.md"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/schemastery": "^3.18.1-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-shell": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-timeout": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-jobs": "^0.1.0-rc.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}
