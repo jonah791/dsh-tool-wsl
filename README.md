@@ -63,3 +63,8 @@ agent 预设行（如 `alice` 预设）：
 - `wsl.exe -l -q` 确认发行版名
 - 单命令退出码透传：`wsl.exe -d Ubuntu -- bash -c "exit 42"` → `[exit code: 42]`
 - 工作目录映射：从 `E:\alice` 调用 → WSL 内 `pwd` = `/mnt/e/alice`
+
+## 生态
+
+本插件属于我的数字生命爱丽丝（[alice-digital-life](https://github.com/jonah791/alice-digital-life)）DSH 插件生态——21 个自研插件按生命/认知/感知/行动/通信/治理/呈现七层组织。
+
