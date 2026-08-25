@@ -21,6 +21,12 @@ WSL 命令行工具插件——在 WSL（默认 Ubuntu）发行版里执行 bash
 - 退出码透传：`exit 7` → `[exit code: 7]`
 - 算术、命令替换、反引号：正常
 
+## v0.3 增强：stdin + wsl_path + wsl_env
+
+- **stdin 支持**：`wsl` 工具新增 `stdin` 参数，喂数据给从 stdin 读取的程序（如 `sort`）。实现上 stdin 一并 base64 编码进命令脚本（`echo <stdin_b64> | base64 -d | <command>`），命令从管道读解码后的 stdin——因为 base64 管道会消费进程 stdin，不能走进程 stdin。
+- **wsl_path**：Windows ↔ WSL 路径转换（纯逻辑，零 wsl.exe 调用）。`C:\foo` ↔ `/mnt/c/foo`，auto 模式按前缀自动判断方向，支持中文/空格路径。
+- **wsl_env**：WSL 环境快照——发行版/内核/磁盘/内存/常用工具清单/代理/shell。section 参数可只看 system/disk/tools。
+
 ## 设计要点
 
 - **执行器**：镜像 `@deepseek-ai/dsh-bash-local` 的 `LocalBashExecutor` 机制（deadline / 输出收集 / 进程组终止 / 超时分类），执行边界替换为 WSL argv。

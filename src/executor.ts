@@ -149,10 +149,17 @@ export class WslExecutor {
    * 的 `$t` 会静默丢失）。把命令 base64 编码后只经管道解码，命令正文完全不接触 Windows
    * 侧的二次解析——任意复杂命令（变量/引号/heredoc/管道/多行）都可靠传递。
    * base64 字符集为 [A-Za-z0-9+/=]，不含空格/引号/`$`/换行，故 `echo <b64>` 无引号也安全。
+   *
+   * stdin 处理：base64 管道会消费进程 stdin（最后的 bash 从管道读，非进程 stdin），因此
+   * 有 stdin 时把它一并 base64 编码成脚本 `echo <stdin_b64> | base64 -d | <command>`，
+   * 命令从该管道读解码后的 stdin；进程 stdin 保持 ignore（避免双 stdin 冲突）。
    */
   private argvFor(spec: WslExecSpec): string[] {
-    const b64 = Buffer.from(spec.command, 'utf8').toString('base64')
     const inner = this.config.loginShell ? 'bash -lc' : 'bash'
+    const body = spec.stdin !== undefined
+      ? `echo ${Buffer.from(spec.stdin, 'utf8').toString('base64')} | base64 -d | ${spec.command}`
+      : spec.command
+    const b64 = Buffer.from(body, 'utf8').toString('base64')
     const wrapper = `echo ${b64} | base64 -d | ${inner}`
     return [this.config.wslExe, '-d', this.config.distro, '--', 'bash', '-c', wrapper]
   }
@@ -163,7 +170,8 @@ export class WslExecutor {
       argv,
       cwd: spec.workdir,
       stdio: {
-        stdin: spec.stdin !== undefined ? { data: spec.stdin } : 'ignore',
+        // stdin 数据已嵌入命令脚本（见 argvFor），进程 stdin 一律 ignore 防冲突
+        stdin: 'ignore',
         stdout: collect(stdoutMaxBytes),
         stderr: collect(this.config.maxOutputBytes),
       },
