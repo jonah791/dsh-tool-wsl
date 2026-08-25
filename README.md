@@ -9,9 +9,22 @@ WSL 命令行工具插件——在 WSL（默认 Ubuntu）发行版里执行 bash
 - 后台执行：`run_in_background: true` → job id（`job_output` / `job_kill`）
 - 工作目录：Windows 路径（如 `E:\alice`），wsl.exe 自动映射到 WSL 对应目录
 
+## v0.2 核心增强：base64 命令通道（修复传参破坏）
+
+**问题**：wsl.exe 会把 `--` 之后的 argv 重新 join 成命令行字符串再交给 Linux 侧执行，期间 `$`、引号、转义、换行会被破坏。实测 `for t in git curl; do echo "$t"; done` 的 `$t` 静默丢失（输出空），复杂命令（变量/嵌套引号/heredoc/管道）不可靠。
+
+**修复**：命令先 base64 编码，外层只传 `echo <b64> | base64 -d | bash`。base64 字符集 `[A-Za-z0-9+/=]` 不含空格/引号/`$`/换行，命令正文完全不接触 Windows 侧二次解析——任意复杂 bash 逐字传递。
+
+**验证**（base64 通道实测全过）：
+- for 循环变量、环境变量、嵌套引号+变量：解码还原 100% 一致
+- heredoc、管道链、多行命令、Unicode（中文/日文/emoji）：逐字可靠
+- 退出码透传：`exit 7` → `[exit code: 7]`
+- 算术、命令替换、反引号：正常
+
 ## 设计要点
 
 - **执行器**：镜像 `@deepseek-ai/dsh-bash-local` 的 `LocalBashExecutor` 机制（deadline / 输出收集 / 进程组终止 / 超时分类），执行边界替换为 WSL argv。
+- **命令传递**：base64 通道（v0.2），外层 `bash -c` 只承载解码管道，命令本身不直传。
 - **不依赖宿主 `shell` seam**：直接走 `ctx.subprocess`，绕开 Windows 无 bash 的问题。
 - **沙箱边界（重要）**：WSL 进程运行在 Linux VM 内，Windows 文件沙箱提供方（`dsh-pwsh-sandbox` 等）无法限制其文件访问。因此本工具**不接入 Windows 文件沙箱**，也不声明 `sandbox_permissions` 升级参数；工具描述中明示此边界。若部署需要严格沙箱，请勿在受限会话中暴露此工具。
 

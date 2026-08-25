@@ -142,10 +142,19 @@ export class WslExecutor {
     }
   }
 
-  /** WSL 执行边界：wsl.exe -d <distro> -- bash [-l]c <command> */
+  /** WSL 执行边界：wsl.exe -d <distro> -- bash -c "<base64 解码管道>"
+   *
+   * 为何走 base64 通道：wsl.exe 会把 `--` 之后的 argv 重新 join 成命令行字符串再交给
+   * Linux 侧执行，期间 `$` / 引号 / 转义 / 换行会被破坏（实测 `for t in ...; echo "$t"`
+   * 的 `$t` 会静默丢失）。把命令 base64 编码后只经管道解码，命令正文完全不接触 Windows
+   * 侧的二次解析——任意复杂命令（变量/引号/heredoc/管道/多行）都可靠传递。
+   * base64 字符集为 [A-Za-z0-9+/=]，不含空格/引号/`$`/换行，故 `echo <b64>` 无引号也安全。
+   */
   private argvFor(spec: WslExecSpec): string[] {
-    const flag = this.config.loginShell ? '-lc' : '-c'
-    return [this.config.wslExe, '-d', this.config.distro, '--', 'bash', flag, spec.command]
+    const b64 = Buffer.from(spec.command, 'utf8').toString('base64')
+    const inner = this.config.loginShell ? 'bash -lc' : 'bash'
+    const wrapper = `echo ${b64} | base64 -d | ${inner}`
+    return [this.config.wslExe, '-d', this.config.distro, '--', 'bash', '-c', wrapper]
   }
 
   private spawnSpec(spec: WslExecSpec, argv: string[], stdoutMaxBytes: number, signal: AbortSignal | undefined): unknown {

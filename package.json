@@ -1,7 +1,7 @@
 {
   "name": "dsh-tool-wsl",
-  "version": "0.1.0",
-  "description": "WSL 命令行工具：在 WSL（Ubuntu）环境执行 bash 命令（wsl.exe -d <distro> -- bash -c），Windows 上取代 dsh-tool-bash",
+  "version": "0.2.0",
+  "description": "WSL 命令行工具：在 WSL（Ubuntu）环境执行 bash 命令（wsl.exe -d <distro> -- bash -c），Windows 上取代 dsh-tool-bash；v0.2 命令走 base64 通道，任意复杂 bash 可靠传递",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
