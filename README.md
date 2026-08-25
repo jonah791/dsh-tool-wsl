@@ -1,3 +1,13 @@
+<!--
+  DSH 插件生态公约声明（plugin-ecosystem-convention · 组合优先/声明清晰/兼容优先）
+  purpose: WSL 命令行工具：在 WSL（Ubuntu）环境执行 bash 命令（wsl.exe -d <distro> -- bash -c），Windows 上取代 dsh-tool-bash；v0.2 命令走 base64 通道，v0.3 新增 stdin/wsl_path/wsl_env
+  inject: 'tools','subprocess','systemPrompt'
+  tools: wsl,wsl_path,wsl_env
+  runtime: host-only
+  envDeps: WSL Ubuntu 发行版
+  boundary: 无特殊授权边界
+  compat: cordis ^4.0.1 / dsh-tools ^0.1.0-rc.6
+-->
 # dsh-tool-wsl
 
 WSL 命令行工具插件——在 WSL（默认 Ubuntu）发行版里执行 bash 命令，Windows 上取代 `dsh-tool-bash`（Windows 无原生 bash，官方 bash 工具按平台禁用）。
