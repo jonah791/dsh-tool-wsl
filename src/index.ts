@@ -393,10 +393,11 @@ export function apply(ctx: Context, config: Config): void {
     },
     async execute(args: { section?: string }, exec: { signal: AbortSignal }) {
       const section = args.section ?? 'all'
+      // 命令名（非包名）：ripgrep 包的命令是 rg；cargo/rustc 在 ~/.cargo/bin（非登录 shell PATH 不含，单独探测）
       const probes = [
         'git', 'curl', 'wget', 'python3', 'pip3', 'node', 'npm', 'docker',
-        'tmux', 'zsh', 'htop', 'ripgrep', 'rg', 'fzf', 'jq', 'sqlite3',
-        'gcc', 'make', 'openssl', 'vim', 'nvim', 'ncdu', 'aria2c', 'cargo', 'go',
+        'tmux', 'zsh', 'htop', 'rg', 'fzf', 'jq', 'sqlite3',
+        'gcc', 'make', 'openssl', 'vim', 'nvim', 'ncdu', 'aria2c', 'go',
       ]
       const commands: string[] = []
       if (section === 'all' || section === 'system') {
@@ -404,7 +405,7 @@ export function apply(ctx: Context, config: Config): void {
       }
       if (section === 'all' || section === 'tools') {
         const names = probes.join(' ')
-        commands.push(`echo '## tools'; for t in ${names}; do if command -v "$t" >/dev/null 2>&1; then echo "OK  $t"; else echo "MISS $t"; fi; done`)
+        commands.push(`echo '## tools'; for t in ${names}; do if command -v "$t" >/dev/null 2>&1; then echo "OK  $t"; else echo "MISS $t"; fi; done; if command -v cargo >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cargo" ]; then echo "OK  cargo"; else echo "MISS cargo"; fi`)
       }
       if (section === 'all') {
         commands.push(`echo; echo '## proxy'; env | grep -iE '^(http|https|no)_proxy=' | sed 's/=[^@]*@/=<redacted>@/' || echo '(no proxy set)'; echo; echo '## shell'; echo "$SHELL"`)
