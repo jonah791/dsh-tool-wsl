@@ -10,6 +10,12 @@
 -->
 # dsh-tool-wsl
 
+
+<p align="center">
+  <a href="https://github.com/jonah791/dsh-tool-wsl"><img src="https://img.shields.io/badge/version-0.3.0-blue" alt="version"></a>
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
+  <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
+</p>
 WSL 命令行工具插件——在 WSL（默认 Ubuntu）发行版里执行 bash 命令，Windows 上取代 `dsh-tool-bash`（Windows 无原生 bash，官方 bash 工具按平台禁用）。
 
 ## 用途
