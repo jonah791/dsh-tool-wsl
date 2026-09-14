@@ -13,6 +13,7 @@
  */
 import { clampTimeout, deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { Context } from '@deepseek-ai/cordis'
+import { redactHome, streamStatsOf, summarizeCommand, traceEnabled, wslTrace } from './trace.ts'
 
 /** Model-friendly 环境覆盖（与 bash-local 同源，避免输出被着色/分页干扰）。 */
 const ENV_OVERRIDES: Record<string, string> = {
@@ -52,6 +53,10 @@ export interface WslExecRequest {
   stdin?: string
   env?: Record<string, string>
   dshEnv?: Record<string, string>
+  /** 观测标记：发起方标签（`wsl:foreground` / `wsl:background` / `wsl_env`），只进轨迹。 */
+  traceLabel?: string
+  /** 观测标记：工具调用 id（轨迹可 join 会话事件流）。 */
+  traceCallId?: string
 }
 
 export interface WslExecSpec {
@@ -63,6 +68,10 @@ export interface WslExecSpec {
   stdin?: string
   env?: Record<string, string>
   dshEnv?: Record<string, string>
+  /** 观测标记：发起方标签（只进轨迹，不参与执行）。 */
+  traceLabel?: string
+  /** 观测标记：工具调用 id（只进轨迹，不参与执行）。 */
+  traceCallId?: string
 }
 
 export interface WslStream {
@@ -98,8 +107,14 @@ export interface WslProcess {
 }
 
 /** subprocess 接缝的窄结构契约（避免跨包类型耦合；形状与 dsh-subprocess 一致）。 */
+interface StreamReadLike {
+  text: string
+  nextOffset: number
+  lossy: boolean
+  spillPath?: string
+}
 interface CollectReader {
-  readFrom(offset: number): { text: string; nextOffset: number; lossy: boolean; spillPath?: string }
+  readFrom(offset: number): StreamReadLike
 }
 interface SpawnHandle {
   done: Promise<{ exitCode: number | null; signal: string | null }>
@@ -110,8 +125,7 @@ interface SubprocessLike {
   spawn(spec: unknown): SpawnHandle
 }
 
-function finalOutput(reader: CollectReader): WslStream {
-  const read = reader.readFrom(0)
+function streamOf(read: StreamReadLike): WslStream {
   return {
     text: read.text,
     truncated: read.lossy,
@@ -139,7 +153,32 @@ export class WslExecutor {
       ...(request.stdin !== undefined ? { stdin: request.stdin } : {}),
       ...(request.env !== undefined ? { env: request.env } : {}),
       ...(request.dshEnv !== undefined ? { dshEnv: request.dshEnv } : {}),
+      ...(request.traceLabel !== undefined ? { traceLabel: request.traceLabel } : {}),
+      ...(request.traceCallId !== undefined ? { traceCallId: request.traceCallId } : {}),
     }
+  }
+
+  /** 观测收口（唯一落笔点）：写一行执行轨迹；任何失败都不影响执行（见 trace.ts）。 */
+  private trace(
+    phase: 'exec/start' | 'exec/end' | 'exec/error',
+    mode: 'foreground' | 'background',
+    spec: WslExecSpec,
+    startedAtMs: number,
+    extra: Partial<Parameters<typeof wslTrace>[0]> = {},
+  ): void {
+    if (!traceEnabled()) return
+    wslTrace({
+      phase,
+      caller: spec.traceLabel ?? (mode === 'background' ? 'wsl:background' : 'wsl:foreground'),
+      ...(spec.traceCallId !== undefined ? { callId: spec.traceCallId } : {}),
+      distro: this.config.distro,
+      workdir: redactHome(spec.workdir),
+      command: summarizeCommand(spec.command),
+      commandChars: spec.command.length,
+      timeoutMs: spec.timeoutMs,
+      durationMs: Math.max(0, Date.now() - startedAtMs),
+      ...extra,
+    })
   }
 
   /** WSL 执行边界：wsl.exe -d <distro> -- bash -c "<base64 解码管道>"
@@ -191,6 +230,8 @@ export class WslExecutor {
   }
 
   async runArgv(spec: WslExecSpec, argv: string[]): Promise<WslRunResult> {
+    const startedAtMs = Date.now()
+    this.trace('exec/start', 'foreground', spec, startedAtMs)
     const d = deadline(spec.signal, spec.timeoutMs, 'WSL_TIMEOUT')
     try {
       const handle = this.subprocess.spawn(this.spawnSpec(spec, argv, spec.stdoutMaxBytes, d.signal))
@@ -198,14 +239,37 @@ export class WslExecutor {
       const collected = handle.collected
       const timedOut = timeoutOf(d.signal, 'WSL_TIMEOUT') !== undefined
       const aborted = d.signal.aborted && !timedOut
+      const stdoutRead = collected.stdout.readFrom(0)
+      const stderrRead = collected.stderr.readFrom(0)
+      const stdoutStats = streamStatsOf(stdoutRead)
+      const stderrStats = streamStatsOf(stderrRead)
+      this.trace('exec/end', 'foreground', spec, startedAtMs, {
+        exitCode: outcome.exitCode,
+        signal: outcome.signal,
+        timedOut,
+        aborted,
+        status: 'completed',
+        stdoutBytes: stdoutStats.bytes,
+        stdoutKept: stdoutStats.keptBytes,
+        stdoutDropped: stdoutStats.droppedBytes,
+        stdoutTruncated: stdoutStats.truncated,
+        stderrBytes: stderrStats.bytes,
+        stderrKept: stderrStats.keptBytes,
+        stderrDropped: stderrStats.droppedBytes,
+        stderrTruncated: stderrStats.truncated,
+        spill: stdoutStats.spill || stderrStats.spill,
+      })
       return {
         ...outcome,
         timedOut,
         aborted,
         timeoutMs: spec.timeoutMs,
-        stdout: finalOutput(collected.stdout),
-        stderr: finalOutput(collected.stderr),
+        stdout: streamOf(stdoutRead),
+        stderr: streamOf(stderrRead),
       }
+    } catch (error: unknown) {
+      this.trace('exec/error', 'foreground', spec, startedAtMs, { error: String(error) })
+      throw error
     } finally {
       d[Symbol.dispose]()
     }
@@ -217,7 +281,15 @@ export class WslExecutor {
   }
 
   startArgv(spec: WslExecSpec, argv: string[]): WslProcess {
-    const running = this.subprocess.spawn(this.spawnSpec(spec, argv, this.config.maxOutputBytes, spec.signal))
+    const startedAtMs = Date.now()
+    this.trace('exec/start', 'background', spec, startedAtMs)
+    let running: SpawnHandle
+    try {
+      running = this.subprocess.spawn(this.spawnSpec(spec, argv, this.config.maxOutputBytes, spec.signal))
+    } catch (error: unknown) {
+      this.trace('exec/error', 'background', spec, startedAtMs, { error: String(error) })
+      throw error
+    }
     const collected = running.collected
     let spawnFailureNote: string | undefined
     const consumeSpawnFailure = () => {
@@ -238,10 +310,18 @@ export class WslExecutor {
           }
           proc.exitCode = outcome.exitCode
           proc.signal = outcome.signal
+          // 后台输出归 job 的增量 reader（见 readOutput），本轨迹不消费流——字节统计不可得
+          this.trace('exec/end', 'background', spec, startedAtMs, {
+            exitCode: outcome.exitCode,
+            signal: outcome.signal,
+            status: proc.status,
+            streamsDeferred: true,
+          })
         },
         (error: unknown) => {
           proc.status = 'killed'
           spawnFailureNote = `spawn failed: ${String(error)}`
+          this.trace('exec/error', 'background', spec, startedAtMs, { error: String(error) })
         },
       ),
       readOutput: () => {

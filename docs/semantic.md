@@ -84,6 +84,42 @@ agent loop ──tool call: wsl { command, description, workdir?, timeoutMs?, st
 | 宿主 subprocess 接缝 | `src/executor.ts:spawnSpec` → `this.subprocess.spawn({ argv, cwd, stdio:{stdin:'ignore',stdout:collect(...),stderr:collect(...)}, graceMs, signal, env })` | 前/后台执行期（`inject` 声明 `subprocess`） |
 | 宿主 shell 契约 | `src/index.ts:import { parseExitStatus } from '@deepseek-ai/dsh-shell'` → `presentWslResult` | 渲染 terminal 卡片时（正文与 exit 状态拆开） |
 
+### 4.3 观测轨迹契约（S4 证据层 · 2026-09-14）
+
+**落盘路径（单一真源）**：`<DSH_HOME>/wsl-trace.jsonl`——`DSH_HOME` 由 `src/trace.ts:resolveHome()`（`DSH_HOME` 环境变量 → 回退 `<homedir>/.dsh`）解析，`wslTracePath(home)` 是唯一的文件名来源；本机解析为 `E:\alice\.dsh\wsl-trace.jsonl`。**一行一阶段**（单行 JSON，可 `tail`/`grep`），追加写，进程内不轮转。开关：`DSH_WSL_TRACE=0` 关闭（缺省开启——证据层是默认行为，不是可选项）。
+
+**阶段枚举**（`phase`）：`boot`（`apply` 时一行，自报生效配置）｜`exec/start`（执行前一行，**先落笔再 spawn**，故「试过执行」本身可证）｜`exec/end`（正常收尾，含超时/被杀）｜`exec/error`（`spawn` 抛错——执行器内唯一未捕获路径）。
+
+**行 schema**（键序固定，可选字段按序前插，缺省字段不写）：
+
+| 字段 | 语义 | 五问 |
+|------|------|------|
+| `atMs` / `pid` / `build` | 写入时刻（ms）/ 进程 pid / `<version>@<lib/trace.js mtime ms>` | Q1 |
+| `caller` / `callId?` | 发起方标签（`apply`/`wsl`/`wsl:background`/`wsl_env`）/ 工具调用 id（可 join 会话事件流） | Q2 |
+| `phase` / `error?` / `status?` | 阶段枚举 / spawn 错误串 / 后台终态（`running`\|`completed`\|`killed`） | Q3 |
+| `distro` / `workdir` / `command` / `commandChars` | 发行版 / 工作目录（主目录折叠为 `<home>`）/ **脱敏后**命令摘要（换行折成 ` ; `，超 240 字符带 `...(+N chars)`）/ 命令原始字符数 | Q2/Q4 |
+| `timeoutMs` / `durationMs` | 本次时间预算 / 阶段实耗（`exec/start` = 0） | Q5 |
+| `exitCode?` / `signal?` / `timedOut?` / `aborted?` | 退出码（null = 死于信号）/ 终止信号 / 超时被杀 / 被调用方取消 | Q4 |
+| `stdoutBytes?` / `stdoutKept?` / `stdoutDropped?` / `stdoutTruncated?` / `spill?` | 产量（整流字节偏移）/ 内存保留量 / **被截断了多少**（= bytes − kept）/ 是否截断 / 是否产生溢出落盘文件；`stderr*` 同形 | Q4 |
+| `streamsDeferred?` | 后台执行：输出归 job 增量 reader，轨迹不消费流（字节统计不可得，**显式标注而非填 0**） | Q4 |
+| `cfg?` | 仅 `boot`：`distro/wslExe/loginShell/timeoutMs/maxTimeoutMs/maxOutputBytes/maxSpillBytes/enableRunInBackground` | Q1 |
+
+**隐私不变量（MUST）**：`command` 摘要先经 `redactSecrets`（Bearer/Basic/Token 头、URL userinfo、`KEY=value`/`KEY: value` 中键名像凭据者、`--token/--password/--key…` 旗标）再经 `redactHome`（`C:\Users\X`、`C:/Users/X`、`/mnt/c/Users/X` 三形态 → `<home>`）；`workdir` 同样过 `redactHome`；**`stdin` 正文从不记录**（管道语义，可能含数据/凭据）。脱敏是幂等的纯函数。
+
+**观测不反噬主流程（MUST）**：全部落盘 IO 吞错并返回 `bool`（`appendTraceEntry` → `false`）；执行结果、异常传播、job 句柄语义**不受轨迹影响**（含「`DSH_HOME` 不可写」这一退化路径，见 A20）。
+
+**调用点清单（MUST）**：
+
+| 调用点（文件:符号） | 阶段 | 内容 |
+|---|---|---|
+| `src/index.ts:apply` → `wslTraceBoot(config)` | `boot` | 生效配置摘录（一次装载一行） |
+| `src/executor.ts:WslExecutor.trace`（**唯一落笔收口**）← `runArgv` | `exec/start` / `exec/end` / `exec/error` | 前台执行（`wsl` 工具 + `wsl_env`）三阶段 |
+| 同上 ← `startArgv`（含 `done` 的 two-arm 回调） | `exec/start` / `exec/end` / `exec/error` | 后台执行（`run_in_background`）三阶段 |
+| `src/index.ts:defineTool(wsl).execute` → `request.traceLabel`/`traceCallId` | — | 注入 Q2 字段（**只进轨迹，不参与执行**） |
+| `src/index.ts:defineTool(wsl_env).execute` → `traceLabel: 'wsl_env'` | — | 区分同执行器的第二个调用方 |
+
+“谁发起”的判定链：`traceLabel`（调用点注入）→ 缺省按 `runArgv`/`startArgv` 落 `wsl:foreground`/`wsl:background`。
+
 ## 5 · 边界与信任
 
 - **能力边界 ≠ 沙箱（重要）**：WSL 进程运行在 Linux VM 内，**Windows 文件沙箱提供方（`dsh-pwsh-sandbox` 等）无法限制其文件访问**——故本工具**不接入** Windows 文件沙箱、**不声明 `sandbox_permissions`**，工具描述明示该边界。若部署需要严格沙箱，**不要在受限会话中暴露此工具**。
@@ -96,7 +132,7 @@ agent loop ──tool call: wsl { command, description, workdir?, timeoutMs?, st
 - **`ctx.get(...)` 可选服务 vs `inject` 硬依赖**：`shellEnv`/`jobs` 用 `ctx.get(...)` 取（不进 `inject`），缺失时分别降级（无 `dshEnv` / 抛错）；`inject = ['tools','subprocess','systemPrompt']` 是启动即用的硬依赖（§5.11 第 2 条：`ctx.<service>` 访问必须先声明 inject——本插件用 `ctx.get` 规避可选依赖激活门）。
 - **与 `dsh-jobs` / `dsh-tool-jobs`**：后台执行只是「向 jobs 接缝注册一个 job」，读/停归宿主 job 工具——本插件不自建任务队列。
 - **与 spill 提供方**：落盘位置与策略由宿主 `subprocess` 接缝的 spill 实现决定（本插件只传 `{ maxBytes: maxSpillBytes }` 预算），故文档不承诺具体目录，只承诺「路径会回传并出现在提示里」。
-- **§5.22 可维护性**：可观测证据是**工具返回值**与 `[exit code: N]` 标记；`ctx.logger` 未落盘 → 事故取证靠工具输出而非日志（第 2 条部分满足）。
+- **§5.22 可维护性**：可观测证据分两层——① **工具返回值**与 `[exit code: N]` 标记（模型可见面）；② **侧车轨迹** `<DSH_HOME>/wsl-trace.jsonl`（§4.3，进程外可 `tail`/`grep`，覆盖「截断了多少 / 超时还是取消 / 跑了哪个构建」）。宿主 `ctx.logger` 仍不落盘，故轨迹是排障的唯一落盘证据源。
 
 ## 7 · 可证伪验收清单
 
@@ -118,15 +154,23 @@ agent loop ──tool call: wsl { command, description, workdir?, timeoutMs?, st
 | A14 | 参数非法 fail-loud | `validateWslArgs` 对空/空白命令、空描述、`0`/负数/`NaN`/`Infinity` 超时一律 `throw` | ✅ 2026-09-14 |
 | A15 | 搬家零语义漂移（审计证据） | 逐函数 diff：`git show HEAD:src/index.ts` 中 10 个函数体与 `src/render.ts` **逐字相同**（仅加 `export`）——修复了搬家时误改的一个字符（工具描述 `immediately;` 被写成 `immediately,`） | ✅ 2026-09-14 |
 | A16 | 展示层退化输入不崩 | `presentWslResult` 对空 content / 多块 / 非文本块返回 `undefined`（而非抛错）；`presentWslCall` 后台分支走 `generic` 卡片 | ✅ 2026-09-14 |
+| A17 | **轨迹落盘且五问可答**（§4.3） | `wsl -c 'echo hi'` 后 `tail -2 "$DSH_HOME/wsl-trace.jsonl"` → 一行 `exec/start` + 一行 `exec/end`，`end` 行含 `build`/`caller`/`durationMs`/`exitCode`；`grep -c '"phase":"boot"'` ≥ 1 | ✅ 单测级已实测（`接线：前台执行落 exec/start + exec/end…`）；**线上待验收**（部署后 tail 真实文件） |
+| A18 | **「被截断了多少」可见**（原缺陷面） | 大输出命令 → `exec/end` 行 `stdoutBytes` > `stdoutKept` 且 `stdoutDropped = bytes − kept` > 0、`spill: true` | ✅ 单测级已实测（`streamStatsOf` + 接线用例断言 5000−14） |
+| A19 | 后台执行的两类终态可分辨 | `wsl { command:'sleep 30', run_in_background:true }` → `exec/end` 行 `caller: 'wsl:background'`、`status: 'completed'`、`streamsDeferred: true`（不假装有字节统计） | ✅ 单测级已实测 |
+| A20 | **观测不反噬**（含接线级尸体测试） | `DSH_HOME` 指向「父路径是普通文件」→ `appendTraceEntry` 返回 `false` 且不抛；`WslExecutor.runArgv` 仍正常返回结果、`wslTrace` 返回 `false` | ✅ 2026-09-14（两条：`尸体测试：父路径是普通文件…` + `尸体测试（接线级）…`） |
+| A21 | **隐私红线**（凭据/用户名不落盘） | 含 `GITHUB_TOKEN=…`/`Authorization: Bearer …`/`postgres://u:p@h`/`--password=…` 的命令 → 落盘行内搜不到任一凭据串；`workdir` 中的 `C:\Users\<user>` 折叠为 `<home>` | ✅ 2026-09-14（`隐私尸体测试` + `redactHome/homePathVariants` 用例） |
+| A22 | 脱敏幂等且不误伤无关键名 | `redactSecrets(redactSecrets(x)) === redactSecrets(x)`；`BUILD=1`/`path=/a/b` 原样保留 | ✅ 2026-09-14 |
+| A23 | 构建自报可判「线上跑哪个构建」（Q1） | `build` = `<package.json version>@<lib/trace.js mtime ms>`，可用 `node -e "import('./lib/trace.js').then(m=>console.log(m.selfBuild()))"` 现算比对 | ✅ 单测级已实测（`selfBuild` 用例）；线上比对**待验收** |
+| A24 | spawn 失败留断点（Q3） | `subprocess.spawn` 抛 `ENOENT` → 轨迹 `exec/start` + `exec/error`（含 `ENOENT`），且异常照常抛出、前台/后台两路都有 | ✅ 2026-09-14 |
 
 ## 8 · 与实现的关系
 
-- 主实现：`src/index.ts`（工具注册 + 后台接线 + systemPrompt 段 + `wsl_path`/`wsl_env` 内联实现）、`src/render.ts`（**纯层，零 IO**：`streamText`/`renderResult`/`renderProcessRead`/`processOutcome`/`validateWslArgs`/`wslDescription`/`presentWslCall`/`presentWslResult`/`resolveWorkdir`/`canonicalWslResult`——2026-09-14 从 `index.ts` 抽出，仅搬家）、`src/executor.ts`（`WslExecutor`：`resolve`/`run`/`start`/`argvFor`/`spawnSpec` + 窄结构契约 `CollectReader`/`SpawnHandle`/`SubprocessLike`）。
-- 测试：`tests/render.test.mjs`（19 用例，离线跑 `lib/` 产物，零进程/零 WSL）。
+- 主实现：`src/index.ts`（工具注册 + 后台接线 + systemPrompt 段 + `wsl_path`/`wsl_env` 内联实现）、`src/render.ts`（**纯层，零 IO**：`streamText`/`renderResult`/`renderProcessRead`/`processOutcome`/`validateWslArgs`/`wslDescription`/`presentWslCall`/`presentWslResult`/`resolveWorkdir`/`canonicalWslResult`——2026-09-14 从 `index.ts` 抽出，仅搬家）、`src/executor.ts`（`WslExecutor`：`resolve`/`run`/`start`/`argvFor`/`spawnSpec`/`trace` + 窄结构契约 `StreamReadLike`/`CollectReader`/`SpawnHandle`/`SubprocessLike`）、`src/trace.ts`（**观测层纯函数 + 薄 IO**，2026-09-14 新增：`resolveHome`/`wslTracePath`/`mtimeOf`/`readPackageVersion`/`buildStamp`/`selfBuild`/`homePathVariants`/`redactHome`/`redactSecrets`/`summarizeCommand`/`streamStatsOf`/`serializeTraceEntry`/`parseTraceEntries`/`readTraceEntries`/`appendTraceEntry`/`wslTrace`/`wslTraceBoot`/`traceEnabled`）。
+- 测试：`tests/render.test.mjs`（19 用例）、`tests/trace.test.mjs`（**22 用例**，含正常路径 + 退化路径 + 两条尸体测试 + 隐私尸体测试 + 接线测试；离线跑 `lib/` 产物，假 subprocess 接缝，零进程/零 WSL）；`npm test` = `node --test "tests/*.test.mjs"` → **41 pass / 0 fail**（2026-09-14）。
 - 构建产物：`lib/index.js`、`lib/executor.js`（`main: lib/index.js`）；`npm run build` = `tsc -p tsconfig.json`（**不带 `--noCheck`**，与 session-eject 不同——类型错误会挡构建）。
 - peer 依赖（逐字）：`@deepseek-ai/cordis ^4.0.1`、`@deepseek-ai/schemastery ^3.18.1-rc.1`、`@deepseek-ai/dsh-tools ^0.1.0-rc.6`、`@deepseek-ai/dsh-shell ^0.1.0-rc.7`、`@deepseek-ai/dsh-llm ^0.1.0-rc.7`、`@deepseek-ai/dsh-timeout ^0.1.0-rc.7`、`@deepseek-ai/dsh-system-prompt ^0.1.0-rc.7`、`@deepseek-ai/dsh-jobs ^0.1.0-rc.7`。
 - **未实现/未验证部分显式标注**：① 行为级验收（A4–A9）本轮**未实测**（任务纪律：不跑构建/测试）——标「待验收」，不得当已完成；② 溢出落盘**具体目录**不在本插件契约内（宿主 spill 决定），只承诺「路径回传 + 提示」；③ ~~**无单测**：仓库无 `tests/`，`argvFor`/`resolve`/`wsl_path` 目前只能靠源码判据与手工探测（§5.22 可测试化缺口）。~~ **部分已补（2026-09-14）**：渲染/校验/展示层 10 个纯函数已落 `tests/render.test.mjs`（19 用例）；`executor.ts` 的 `argvFor`/`resolve`/`spawnSpec` 仍无测试（见 §10 U5——它们碰 `ctx.subprocess`/`spill` 接缝，需先抽窄结构契约的纯函数版）。
-- **生效判据**（改了代码后怎么证明真的生效）：① 比对 `lib/*.js` mtime 与 **web 进程启动时间**（`.dsh/plugin-boot.jsonl` 最后一行 `processStartMs`）——产物必须**早于**进程启动（§5.11「重建 ≠ 生效」）；本次核对：`lib/index.js` mtime `2026-08-25 09:33:49` 早于当前进程 `2026-09-14 10:05:47`，账本 `live[]` 含 `dsh-tool-wsl`，且 `src/index.ts`(`09:33:36`)/`src/executor.ts`(`09:19:02`) 早于 `lib` → 构建不落后于源码、跑的就是这份产物。② 行为判据：`wsl { command: 'echo $(date +%s)' }` 有输出即通道通；出现 `[exit code: N]` 即 I6 成立；`wsl_path` 换算即时可验（零进程）。③ 组合判据：新增 `ctx.<service>` 访问若忘写 `inject`，宿主抛 `cannot get property … without inject`——改完按 §5.11 先 `preflight_check`（**full**，毫秒级返回即短路无效）再重启。
+- **生效判据**（改了代码后怎么证明真的生效）：① 比对 `lib/*.js` mtime 与 **web 进程启动时间**（`.dsh/plugin-boot.jsonl` 最后一行 `processStartMs`）——产物必须**早于**进程启动（§5.11「重建 ≠ 生效」）；本次核对：`lib/index.js` mtime `2026-08-25 09:33:49` 早于当前进程 `2026-09-14 10:05:47`，账本 `live[]` 含 `dsh-tool-wsl`，且 `src/index.ts`(`09:33:36`)/`src/executor.ts`(`09:19:02`) 早于 `lib` → 构建不落后于源码、跑的就是这份产物。② 行为判据：`wsl { command: 'echo $(date +%s)' }` 有输出即通道通；出现 `[exit code: N]` 即 I6 成立；`wsl_path` 换算即时可验（零进程）。③ 组合判据：新增 `ctx.<service>` 访问若忘写 `inject`，宿主抛 `cannot get property … without inject`——改完按 §5.11 先 `preflight_check`（**full**，毫秒级返回即短路无效）再重启。④ **证据层生效判据（2026-09-14 新增）**：`wsl -c 'echo trace-probe'` 后 `tail -2 "$DSH_HOME/wsl-trace.jsonl"` 出现该次执行的两行，且 `end` 行 `build` 的 mtime 段 == `stat -c %Y lib/trace.js`×1000 → 证据层与产物同源同版本。**新增源文件必须确认调用侧副本里也有 `lib/trace.js`**（pnpm 硬链接下源目录新增文件不会自动出现在 `.pnpm/<pkg>@…` 副本里）：本插件在 profile 里是 `link:E:/alice/self-plugins/dsh-tool-wsl`（符号链接，无副本），故无该风险；若哪天改成 `file:`/registry 依赖需重跑 §C7 检查。
 - **回退**（出问题怎么办）：① 代码问题 → `git -C E:/alice/self-plugins/dsh-tool-wsl checkout <上个提交>` + `npm run build`，再按「生效判据」重验；② 工具不可用 → 预设里把 `tool-wsl` 行 `disabled: true`（临时）或 `plugin_unmount dsh-tool-wsl`（写 patch + 重启）；③ 需要 Windows 原生兜底 → 启用 `tool-pwsh`（预设已有行，去 `disabled`）；④ 版本级回滚 → `git revert` 后重建；⑤ 复盘用 `plugin_inspect dsh-tool-wsl` + `plugin_boot_status`（确认线上跑的是哪个构建）。
 
 ## 9 · 实践修订记录
@@ -145,11 +189,23 @@ agent loop ──tool call: wsl { command, description, workdir?, timeoutMs?, st
   - 语义**被修正（搬家事故，自查捕获）**：抽取 `wslDescription` 时把 `immediately;` 误写成 `immediately,`——**工具描述是模型可见输入**，一个标点也是行为变更。处置：逐函数与 `git show HEAD:src/index.ts` 做 diff，10/10 逐字一致后才提交（本条即审计证据）。教训：**「仅搬家」必须有机械证据**，不能靠人眼读一遍；大批量搬迁一律加「搬家后 diff 原文件」这一步。
   - 教训：纯函数困在 `apply` 所在文件的作用域时，**「它到底怎么渲染」只能靠人读源码**——而它恰恰是模型与用户直接看到的那一层（卡片/标记/截断提示），最该有离线断言。
 
+- **2026-09-14 可维护性补课（批次 S4-C）：执行轨迹证据层 + 22 测试**
+  - 语义**被补充**：新增 §4.3「观测轨迹契约」——落盘路径 `<DSH_HOME>/wsl-trace.jsonl`、阶段枚举 `boot`/`exec/start`/`exec/end`/`exec/error`、行 schema 全字段、隐私不变量（脱敏 + `<home>` 折叠 + `stdin` 不记录）、观测不反噬保证、**调用点清单**（`apply` 的 boot + `WslExecutor.trace` 唯一收口 + 两处 `traceLabel` 注入）。
+  - 语义**被修正（原缺陷面）**：「输出被截断」此前只有布尔 `truncated` + `spillPath`——**被砍掉多少字节在插件外不可见**（用户只看到被砍过的结果）。修法不是改行为，而是把 `readFrom(0).nextOffset`（整流字节偏移 = 产量）与 `Buffer.byteLength(text)`（内存保留量）之差落盘为 `stdoutDropped`/`stderrDropped`。
+  - 语义**被补充（零行为漂移的搬家证据）**：`finalOutput(reader)` 拆成 `streamOf(read)` + 调用点显式 `readFrom(0)`（一次读取、同序、同字段），`git diff` 逐行核对 = 无行为变更；`traceLabel`/`traceCallId` 是**只进轨迹**的透传字段，不参与 argv/spawn/结果构造。
+  - 语义**被修正（原「§5.22 部分满足」的判据过松）**：此前把「工具返回值 + `[exit code: N]` 标记」当作可维护性证据——那对**调用者**可见，对**进程外排障者**不可见（宿主 logger 不落盘）。现按 §5.22 规则 1 落侧车轨迹，§6 对应条目已改写。
+  - 教训：**观测层要落在一个收口**（`WslExecutor.trace`），否则前台/后台/`wsl_env` 三条路径各写一遍，漏一处就是新的静默缺口。
+
 ## 10 · 未决问题
 
 - **U1 可测试化（§5.22）**：`argvFor`（base64 外壳）、`resolve`（clampTimeout/缺省填充）、`wsl_path`（三向判定）都是纯函数级逻辑，应抽 `tests/*.test.mjs` 离线跑——目前无测试。倾向先补 `wsl_path` 与 `argvFor`（零进程、零外部依赖）。
   → **部分闭环（2026-09-14）**：渲染/校验/展示层（10 函数）已落 19 用例（A11–A16）。`wsl_path` 的三向判定在 `index.ts` 内联实现里，属**下一步目标**（它需要先把判定抽成纯函数才能离线断言）。
 - **U5 `executor.ts` 仍无离线测试**（本次新增登记）：`argvFor`（base64 外壳）与 `resolve`（clampTimeout / 缺省填充）是纯函数，但 `run`/`start` 依赖 `ctx.subprocess`/`ctx.spill` 接缝。倾向：把 `argvFor` 与 `resolve` 提为模块级 `export`（或抽 `src/spec.ts`），先给这两个零依赖函数补测试；`run`/`start` 的接线测试需要宿主桩，优先级低于 `wsl_path`。
+  → **部分闭环（2026-09-14 S4-C）**：`runArgv`/`startArgv` 的接线测试已落地（`tests/trace.test.mjs` 用**假 subprocess 接缝**：`spawn()` 返回 `{done, collected:{stdout:{readFrom}}, terminate}`）——证明了「执行 → 轨迹」的接线，但**没有**断言 argv/spawnSpec 的逐字契约（`argvFor` 的 base64 外壳仍只有源码判据）。
+- **U6 轨迹文件无轮转**（2026-09-14 新增）：`<DSH_HOME>/wsl-trace.jsonl` 追加写、无上限/无轮转。粗算每次执行 2 行 × ~400B；高频使用下会缓慢增长。倾向：先观察（同 `preflight-trace.jsonl`/`compaction-trace.jsonl` 的现状），若超过 ~10MB 再引入「保留末 N 行」的有界裁剪（参考 `dsh-plugin-bootreport` 的 `keepLines + 50`），**不**做外部日志轮转依赖。
+- **U7 线上轨迹验收未做**（2026-09-14 新增）：A17/A23 的「线上」一半要等插件部署 + 重启后 `tail` 真实文件才能标 ✅。本批次不部署（派发纪律），故显式挂起。
+- **U8 脱敏已知盲区**（2026-09-14 新增）：① 短旗标附着形式 `mysql -pSECRET`（`-p` 太通用，`mkdir -p /x` 会被误伤，故**故意不脱敏**，代价是这一形态会漏）；② base64/hex 编码后的凭据不可识别（例如 `echo <b64> | base64 -d` 通道内的命令原文——`argvFor` 的 base64 串本身**不进轨迹**，但用户命令里若自带编码凭据则漏）；③ 非 ASCII 用户名的路径变体只覆盖当前 `homedir()` 一种大小写形态。判定：以上均为**过度脱敏会伤可诊断性**所致的自觉取舍，登记为已知边界而非常态缺口。
+- **U9 注册表登记**：见 U4（`semantic_register` 由主 agent 执行）。
 - **U2 行为级验收归属**：A4–A9 需真跑 WSL 命令；由谁在何时统一验收（本任务纪律不跑测试）——建议主 agent 排一条验收清单任务。
 - **U3 `cwd` 缺省三级回落**：`workdir ?? config.cwd ?? process.cwd()` 中 `process.cwd()` 是 web 进程目录，与「会话工作区」概念不完全等价；是否应改为「无 header cwd 时显式用会话工作区/报错」？倾向保留现状但记录语义差异。
 - **U4 注册表登记**：`docs/semantics/registry.json` 尚无本条目（本任务禁改注册表）——由主 agent 用 `semantic_register` 登记（`status: draft`、`doc: self-plugins/dsh-tool-wsl/docs/semantic.md`、`impl` 取 `src/index.ts` + `src/executor.ts`）。

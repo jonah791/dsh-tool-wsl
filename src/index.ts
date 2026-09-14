@@ -18,6 +18,7 @@ import { TOOL_ABORTED, defineTool, type ToolCallView, type ToolResultView } from
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 import { WslExecutor, type WslExecutorConfig, type WslProcess, type WslRunResult } from './executor.ts'
+import { wslTraceBoot } from './trace.ts'
 import {
   streamText, renderResult, renderProcessRead, processOutcome, validateWslArgs, wslDescription,
   presentWslCall, presentWslResult, resolveWorkdir, canonicalWslResult,
@@ -61,6 +62,7 @@ interface ShellEnvLike {
 export function apply(ctx: Context, config: Config): void {
   const backgroundEnabled = config.enableRunInBackground
   const executor = new WslExecutor(ctx, config)
+  wslTraceBoot(config)
 
   ctx.systemPrompt.section({
     name: 'tool:wsl',
@@ -145,12 +147,16 @@ export function apply(ctx: Context, config: Config): void {
       const shellEnv = ctx.get('shellEnv') as ShellEnvLike | undefined
       const dshEnv = shellEnv?.collect(exec)
       const workdir = resolveWorkdir(args.workdir, exec)
+      const callId = typeof exec.callId === 'string' ? exec.callId : undefined
       const request = {
         command: args.command,
         ...(workdir !== undefined ? { workdir } : {}),
         ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}),
         ...(args.stdin !== undefined ? { stdin: args.stdin } : {}),
         ...(dshEnv !== undefined ? { dshEnv } : {}),
+        // 观测标记（只进轨迹，不参与执行）：区分同一执行器的两类调用方
+        traceLabel: args.run_in_background === true ? 'wsl:background' : 'wsl',
+        ...(callId !== undefined ? { traceCallId: callId } : {}),
       }
       if (args.run_in_background === true) {
         if (!backgroundEnabled) throw new Error('run_in_background is disabled for this deployment (enableRunInBackground: false)')
@@ -296,7 +302,7 @@ export function apply(ctx: Context, config: Config): void {
         commands.push(`echo; echo '## proxy'; env | grep -iE '^(http|https|no)_proxy=' | sed 's/=[^@]*@/=<redacted>@/' || echo '(no proxy set)'; echo; echo '## shell'; echo "$SHELL"`)
       }
       const command = commands.join('\n')
-      const result = await executor.run(executor.resolve({ command, signal: exec.signal }))
+      const result = await executor.run(executor.resolve({ command, signal: exec.signal, traceLabel: 'wsl_env' }))
       return { text: result.stdout.text, exitCode: result.exitCode }
     },
   }))
