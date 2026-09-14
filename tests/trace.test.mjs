@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   HOME_TOKEN,
   REDACTED,
@@ -63,7 +64,7 @@ test('selfBuild：<version>@<mtime ms> 形态，且 mtime 来自产物文件（�
   const build = selfBuild()
   assert.match(build, /^[^@]+@\d+$/)
   const [version, mtime] = build.split('@')
-  assert.equal(version, readPackageVersion(new URL('../lib/trace.js', import.meta.url).pathname.replace(/^\//, '')))
+  assert.equal(version, readPackageVersion(fileURLToPath(new URL('../lib/trace.js', import.meta.url))))
   assert.ok(Number(mtime) > 0)
   assert.equal(selfBuild(), build) // 进程内缓存：同一构建串
   assert.equal(buildStamp('/nope/missing.js', ''), 'unknown@0') // 不可得退化
