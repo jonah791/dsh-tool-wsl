@@ -112,13 +112,20 @@ agent loop ──tool call: wsl { command, description, workdir?, timeoutMs?, st
 | A8 | 输出溢出落盘并给出路径 | 大输出命令 → 结果含 `[output truncated; full output: <path>]`，`stdout.spillPath` 非空且文件可读 | **待验收** |
 | A9 | `wsl_path` 双向换算 + 不可判时抛错 | `C:\foo` → `/mnt/c/foo`；`/mnt/c/foo` → `C:\foo`；`relative/path` + auto → 抛 `cannot guess direction …` | **待验收** |
 | A10 | 沙箱边界诚实（不声明升级参数） | `wsl` schema 无 `sandbox_permissions`；描述含 `NOT confined by the Windows file sandbox` | 已实测（源码 schema/描述） |
+| A11 | 回归能力存在且绿 | `npm test`（= `node --test "tests/*.test.mjs"`，跑 `lib/` 产物）→ **19 pass / 0 fail** | ✅ 2026-09-14 |
+| A12 | 渲染标记优先级 | `tests/render.test.mjs`：超时 > 信号 > 退出码；`exit code: 0` 不产生标记；`(no output)` 占位仍带标记 | ✅ 2026-09-14 |
+| A13 | 截断提示不得静默丢失 | 截断而无 spill 路径 → `full output: (unavailable)`（stdout/stderr/进程读取三处） | ✅ 2026-09-14 |
+| A14 | 参数非法 fail-loud | `validateWslArgs` 对空/空白命令、空描述、`0`/负数/`NaN`/`Infinity` 超时一律 `throw` | ✅ 2026-09-14 |
+| A15 | 搬家零语义漂移（审计证据） | 逐函数 diff：`git show HEAD:src/index.ts` 中 10 个函数体与 `src/render.ts` **逐字相同**（仅加 `export`）——修复了搬家时误改的一个字符（工具描述 `immediately;` 被写成 `immediately,`） | ✅ 2026-09-14 |
+| A16 | 展示层退化输入不崩 | `presentWslResult` 对空 content / 多块 / 非文本块返回 `undefined`（而非抛错）；`presentWslCall` 后台分支走 `generic` 卡片 | ✅ 2026-09-14 |
 
 ## 8 · 与实现的关系
 
-- 主实现：`src/index.ts`（工具注册 + 渲染 + 后台接线 + systemPrompt 段 + `wsl_path`/`wsl_env` 内联实现）、`src/executor.ts`（`WslExecutor`：`resolve`/`run`/`start`/`argvFor`/`spawnSpec` + 窄结构契约 `CollectReader`/`SpawnHandle`/`SubprocessLike`）。
+- 主实现：`src/index.ts`（工具注册 + 后台接线 + systemPrompt 段 + `wsl_path`/`wsl_env` 内联实现）、`src/render.ts`（**纯层，零 IO**：`streamText`/`renderResult`/`renderProcessRead`/`processOutcome`/`validateWslArgs`/`wslDescription`/`presentWslCall`/`presentWslResult`/`resolveWorkdir`/`canonicalWslResult`——2026-09-14 从 `index.ts` 抽出，仅搬家）、`src/executor.ts`（`WslExecutor`：`resolve`/`run`/`start`/`argvFor`/`spawnSpec` + 窄结构契约 `CollectReader`/`SpawnHandle`/`SubprocessLike`）。
+- 测试：`tests/render.test.mjs`（19 用例，离线跑 `lib/` 产物，零进程/零 WSL）。
 - 构建产物：`lib/index.js`、`lib/executor.js`（`main: lib/index.js`）；`npm run build` = `tsc -p tsconfig.json`（**不带 `--noCheck`**，与 session-eject 不同——类型错误会挡构建）。
 - peer 依赖（逐字）：`@deepseek-ai/cordis ^4.0.1`、`@deepseek-ai/schemastery ^3.18.1-rc.1`、`@deepseek-ai/dsh-tools ^0.1.0-rc.6`、`@deepseek-ai/dsh-shell ^0.1.0-rc.7`、`@deepseek-ai/dsh-llm ^0.1.0-rc.7`、`@deepseek-ai/dsh-timeout ^0.1.0-rc.7`、`@deepseek-ai/dsh-system-prompt ^0.1.0-rc.7`、`@deepseek-ai/dsh-jobs ^0.1.0-rc.7`。
-- **未实现/未验证部分显式标注**：① 行为级验收（A4–A9）本轮**未实测**（任务纪律：不跑构建/测试）——标「待验收」，不得当已完成；② 溢出落盘**具体目录**不在本插件契约内（宿主 spill 决定），只承诺「路径回传 + 提示」；③ **无单测**：仓库无 `tests/`，`argvFor`/`resolve`/`wsl_path` 目前只能靠源码判据与手工探测（§5.22 可测试化缺口）。
+- **未实现/未验证部分显式标注**：① 行为级验收（A4–A9）本轮**未实测**（任务纪律：不跑构建/测试）——标「待验收」，不得当已完成；② 溢出落盘**具体目录**不在本插件契约内（宿主 spill 决定），只承诺「路径回传 + 提示」；③ ~~**无单测**：仓库无 `tests/`，`argvFor`/`resolve`/`wsl_path` 目前只能靠源码判据与手工探测（§5.22 可测试化缺口）。~~ **部分已补（2026-09-14）**：渲染/校验/展示层 10 个纯函数已落 `tests/render.test.mjs`（19 用例）；`executor.ts` 的 `argvFor`/`resolve`/`spawnSpec` 仍无测试（见 §10 U5——它们碰 `ctx.subprocess`/`spill` 接缝，需先抽窄结构契约的纯函数版）。
 - **生效判据**（改了代码后怎么证明真的生效）：① 比对 `lib/*.js` mtime 与 **web 进程启动时间**（`.dsh/plugin-boot.jsonl` 最后一行 `processStartMs`）——产物必须**早于**进程启动（§5.11「重建 ≠ 生效」）；本次核对：`lib/index.js` mtime `2026-08-25 09:33:49` 早于当前进程 `2026-09-14 10:05:47`，账本 `live[]` 含 `dsh-tool-wsl`，且 `src/index.ts`(`09:33:36`)/`src/executor.ts`(`09:19:02`) 早于 `lib` → 构建不落后于源码、跑的就是这份产物。② 行为判据：`wsl { command: 'echo $(date +%s)' }` 有输出即通道通；出现 `[exit code: N]` 即 I6 成立；`wsl_path` 换算即时可验（零进程）。③ 组合判据：新增 `ctx.<service>` 访问若忘写 `inject`，宿主抛 `cannot get property … without inject`——改完按 §5.11 先 `preflight_check`（**full**，毫秒级返回即短路无效）再重启。
 - **回退**（出问题怎么办）：① 代码问题 → `git -C E:/alice/self-plugins/dsh-tool-wsl checkout <上个提交>` + `npm run build`，再按「生效判据」重验；② 工具不可用 → 预设里把 `tool-wsl` 行 `disabled: true`（临时）或 `plugin_unmount dsh-tool-wsl`（写 patch + 重启）；③ 需要 Windows 原生兜底 → 启用 `tool-pwsh`（预设已有行，去 `disabled`）；④ 版本级回滚 → `git revert` 后重建；⑤ 复盘用 `plugin_inspect dsh-tool-wsl` + `plugin_boot_status`（确认线上跑的是哪个构建）。
 
@@ -132,9 +139,17 @@ agent loop ──tool call: wsl { command, description, workdir?, timeoutMs?, st
   - 语义**被修正**：README 只说「溢出落盘」易被读成「本插件决定落盘目录」——实际预算由本插件给、路径由宿主 spill 接缝回传，文档按后者表述。
   - 教训（同时回写技能 `semantic-doc-first`）：**「可选服务」与「inject 依赖」必须在契约里分开写**，否则下一个读文档的人会照补 `inject` 反而触发激活门问题。
 
+- **2026-09-14 可维护性补课（批次 W3）：渲染/校验/展示层抽纯 + 19 测试**
+  - 语义**被确认**：标记优先级（超时 → 信号 → 退出码，`exitCode===0` 无标记）；`processOutcome` 四态；`presentWslResult` 走宿主 `parseExitStatus` 拆分 `(body, exitCode/signal)`；`resolveWorkdir` 的「无 header cwd 则原样透传」。
+  - 语义**被补充**：新增 `src/render.ts`（10 个纯函数导出），`index.ts` 只留 `apply` 接线与 `BACKGROUND_OUTPUT_PROPERTIES` schema 常量。
+  - 语义**被修正（搬家事故，自查捕获）**：抽取 `wslDescription` 时把 `immediately;` 误写成 `immediately,`——**工具描述是模型可见输入**，一个标点也是行为变更。处置：逐函数与 `git show HEAD:src/index.ts` 做 diff，10/10 逐字一致后才提交（本条即审计证据）。教训：**「仅搬家」必须有机械证据**，不能靠人眼读一遍；大批量搬迁一律加「搬家后 diff 原文件」这一步。
+  - 教训：纯函数困在 `apply` 所在文件的作用域时，**「它到底怎么渲染」只能靠人读源码**——而它恰恰是模型与用户直接看到的那一层（卡片/标记/截断提示），最该有离线断言。
+
 ## 10 · 未决问题
 
 - **U1 可测试化（§5.22）**：`argvFor`（base64 外壳）、`resolve`（clampTimeout/缺省填充）、`wsl_path`（三向判定）都是纯函数级逻辑，应抽 `tests/*.test.mjs` 离线跑——目前无测试。倾向先补 `wsl_path` 与 `argvFor`（零进程、零外部依赖）。
+  → **部分闭环（2026-09-14）**：渲染/校验/展示层（10 函数）已落 19 用例（A11–A16）。`wsl_path` 的三向判定在 `index.ts` 内联实现里，属**下一步目标**（它需要先把判定抽成纯函数才能离线断言）。
+- **U5 `executor.ts` 仍无离线测试**（本次新增登记）：`argvFor`（base64 外壳）与 `resolve`（clampTimeout / 缺省填充）是纯函数，但 `run`/`start` 依赖 `ctx.subprocess`/`ctx.spill` 接缝。倾向：把 `argvFor` 与 `resolve` 提为模块级 `export`（或抽 `src/spec.ts`），先给这两个零依赖函数补测试；`run`/`start` 的接线测试需要宿主桩，优先级低于 `wsl_path`。
 - **U2 行为级验收归属**：A4–A9 需真跑 WSL 命令；由谁在何时统一验收（本任务纪律不跑测试）——建议主 agent 排一条验收清单任务。
 - **U3 `cwd` 缺省三级回落**：`workdir ?? config.cwd ?? process.cwd()` 中 `process.cwd()` 是 web 进程目录，与「会话工作区」概念不完全等价；是否应改为「无 header cwd 时显式用会话工作区/报错」？倾向保留现状但记录语义差异。
 - **U4 注册表登记**：`docs/semantics/registry.json` 尚无本条目（本任务禁改注册表）——由主 agent 用 `semantic_register` 登记（`status: draft`、`doc: self-plugins/dsh-tool-wsl/docs/semantic.md`、`impl` 取 `src/index.ts` + `src/executor.ts`）。
