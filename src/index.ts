@@ -142,7 +142,15 @@ export function apply(ctx: Context, config: Config): void {
         text: value.kind === 'background' ? `started background job ${value.jobId}` : renderResult(value),
       }],
     },
-    async execute(args: WslArgs, exec: { agent?: { session?: { header?: { cwd?: string } } }; signal: AbortSignal; callId?: unknown }) {
+    async execute(args: WslArgs, exec: {
+      // 本插件只窄化自己需要的字段（`session.header.cwd` 用于 workdir 继承）。
+      // ⚠ `id` 是**后台作业 owner** 需要的：jobs-local 要的是 `SessionId`（= `Agent.id`），
+      // 不是 Agent 对象、也不是 `Agent.session`（那是 `Session` 对象）。
+      // 2026-09-23 实测：此处原先没有 `id`，导致传对象 ⇒ `session "[object Object]" has no live agent`。
+      agent?: { id?: string; session?: { header?: { cwd?: string } } }
+      signal: AbortSignal
+      callId?: unknown
+    }) {
       validateWslArgs(args)
       const shellEnv = ctx.get('shellEnv') as ShellEnvLike | undefined
       const dshEnv = shellEnv?.collect(exec)
@@ -172,7 +180,15 @@ export function apply(ctx: Context, config: Config): void {
           jobId: jobs.start({
             kind: 'wsl',
             label: args.command,
-            ...(exec.agent ? { owner: exec.agent } : {}),
+            // ⚠ `owner` 必须是 **`SessionId`**，也就是 `exec.agent.id`——**不是** Agent 对象，
+            // **也不是** `exec.agent.session`（那是 `Session` 对象，见 dsh-agent `types.ts:17`
+            // 与 `runtime-types.ts:168`：`Agent.id: SessionId` / `Agent.session: Session`）。
+            // jobs-local 的 `resolveOwner(session: SessionId)` 会做 `agents.get(session)`，
+            // 传对象进去恒为 undefined ⇒ 抛 `session "[object Object]" has no live agent`。
+            // 2026-09-23 实测：本行原先传 `exec.agent`（对象）⇒ 后台作业**每次都失败**；
+            // 第一次改修成 `exec.agent.session` **仍然失败**（Session 也是对象，错误串一模一样）；
+            // 而 `jobs` 被断言成 `{ start(opts: unknown) }` ⇒ 类型错误被无类型转换掩盖，tsc 全绿。
+            ...(exec.agent ? { owner: exec.agent.id } : {}),
             run: () => {
               const proc = executor.start(executor.resolve(request))
               return {
