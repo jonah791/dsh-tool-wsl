@@ -97,20 +97,20 @@ test('redactSecrets：幂等 + 不误伤无关键名', () => {
 })
 
 test('redactHome/homePathVariants：Windows、POSIX、WSL /mnt 三种形态都折叠成 <home>', () => {
-  // 长的先替换（`/mnt/c/Users/tr` 15 字符在前，避免前缀先被吃掉导致残留）
-  assert.deepEqual(homePathVariants('C:\\Users\\tr'), ['/mnt/c/Users/tr', 'C:\\Users\\tr', 'C:/Users/tr'])
+  // 长的先替换（`/mnt/c/Users/demo` 15 字符在前，避免前缀先被吃掉导致残留）
+  assert.deepEqual(homePathVariants('C:\\Users\\demo'), ['/mnt/c/Users/demo', 'C:\\Users\\demo', 'C:/Users/demo'])
   assert.deepEqual(homePathVariants(''), [])
-  assert.equal(redactHome('cd /mnt/c/Users/tr/proj && ls', 'C:\\Users\\tr'), `cd ${HOME_TOKEN}/proj && ls`)
-  assert.equal(redactHome('copy C:\\Users\\tr\\a.txt', 'C:\\Users\\tr'), `copy ${HOME_TOKEN}\\a.txt`)
+  assert.equal(redactHome('cd /mnt/c/Users/demo/proj && ls', 'C:\\Users\\demo'), `cd ${HOME_TOKEN}/proj && ls`)
+  assert.equal(redactHome('copy C:\\Users\\demo\\a.txt', 'C:\\Users\\demo'), `copy ${HOME_TOKEN}\\a.txt`)
 })
 
 test('summarizeCommand：折平换行、脱敏、折叠主目录、超长带裁剪标记', () => {
-  assert.equal(summarizeCommand('a\n  b\nc', 240, 'C:\\Users\\tr'), 'a ; b ; c')
-  assert.equal(summarizeCommand('PASSWORD=x ls', 240, 'C:\\Users\\tr'), `PASSWORD=${REDACTED} ls`)
-  const long = summarizeCommand('x'.repeat(300), 240, 'C:\\Users\\tr')
+  assert.equal(summarizeCommand('a\n  b\nc', 240, 'C:\\Users\\demo'), 'a ; b ; c')
+  assert.equal(summarizeCommand('PASSWORD=x ls', 240, 'C:\\Users\\demo'), `PASSWORD=${REDACTED} ls`)
+  const long = summarizeCommand('x'.repeat(300), 240, 'C:\\Users\\demo')
   assert.equal(long.length > 240, true)
   assert.ok(long.endsWith('...(+60 chars)'))
-  assert.equal(summarizeCommand('y'.repeat(10), 240, 'C:\\Users\\tr').length, 10)
+  assert.equal(summarizeCommand('y'.repeat(10), 240, 'C:\\Users\\demo').length, 10)
 })
 
 // ---------- 流统计（Q4：被截断了多少） ----------
@@ -236,7 +236,7 @@ test('隐私尸体测试：含凭据的命令 → 落盘行里搜不到任何凭
   ].join('\n')
   assert.equal(wslTrace({
     phase: 'exec/start', caller: 'wsl:foreground', durationMs: 0,
-    command: summarizeCommand(command, 240, 'C:\\Users\\tr'),
+    command: summarizeCommand(command, 240, 'C:\\Users\\demo'),
     commandChars: command.length,
   }, { path, now: 1, pid: 1 }), true)
   const raw = readFileSync(path, 'utf8')
@@ -262,7 +262,7 @@ function fakeSubprocess(reads) {
 
 const specOf = (over = {}) => ({
   command: 'echo hi',
-  workdir: 'C:\\Users\\tr\\proj',
+  workdir: 'C:\\Users\\demo\\proj',
   timeoutMs: 120000,
   stdoutMaxBytes: 64000,
   ...over,
